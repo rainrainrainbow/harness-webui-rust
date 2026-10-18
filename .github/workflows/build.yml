@@ -1,0 +1,38 @@
+name: Build aarch64 binary
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install cross-linker & zigbuild
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          pipx install cargo-zigbuild
+
+      - name: Build release (aarch64 musl)
+        run: |
+          cargo zigbuild --release --target aarch64-unknown-linux-musl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-webui-rust-aarch64
+          path: target/aarch64-unknown-linux-musl/release/harness-webui-rust
+          if-no-files-found: error

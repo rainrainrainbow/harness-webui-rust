@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DeepSeek Harness · Web UI</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div id="brand">▚ DeepSeek Harness <span class="badge">mock</span></div>
+  <div class="grow"></div>
+  <button id="trajBtn" class="btn ghost">Trajectory</button>
+  <button id="themeBtn" class="btn ghost" title="亮/暗主题">◐</button>
+  <button id="settingsBtn" class="btn ghost">⚙</button>
+</header>
+
+<div id="layout">
+  <!-- 左侧 Workbench 侧边栏（整列 ↔ 56px 窄轨） -->
+  <aside id="sidebar">
+    <button id="newSess" class="btn">＋ 新会话</button>
+    <div class="sess-label">会话</div>
+    <ul id="sessList"></ul>
+    <div class="rail-actions">
+      <button id="collapseBtn" class="btn ghost" title="折叠为窄轨 / 展开">⇤</button>
+    </div>
+  </aside>
+
+  <!-- 中间：工作区选择 或 聊天 -->
+  <main id="main">
+    <div id="workspacePicker" class="hidden">
+      <h2>选择工作区</h2>
+      <p class="hint">所有操作都会发生在所选目录内。当前从服务启动目录出发。</p>
+      <div id="crumbs"></div>
+      <div id="dirList"></div>
+      <div class="row">
+        <input id="newDirName" placeholder="新建目录名">
+        <button id="mkDirBtn" class="btn">创建目录</button>
+      </div>
+      <button id="pickWsBtn" class="btn primary" style="margin-top:8px">选择此处为工作区</button>
+    </div>
+
+    <div id="chatView" class="hidden">
+      <div id="wsChip"></div>
+      <div id="msgs"></div>
+      <div id="composer">
+        <div class="selects">
+          <select id="modelSel" title="模型"></select>
+          <select id="reasonSel" title="推理等级">
+            <option>低</option><option selected>中</option><option>高</option>
+          </select>
+          <select id="modeSel" title="运行模式">
+            <option>Standard</option><option>Code</option><option>Minimal</option><option>Creator</option>
+          </select>
+          <select id="permSel" title="权限预设">
+            <option>Standard</option><option>Full access</option>
+          </select>
+          <span id="wsHint" class="hint"></span>
+        </div>
+        <div class="sendrow">
+          <textarea id="prompt" rows="2" placeholder="例如：总结这个仓库 / 修复 parser 的 bug / 写一份运维报告…"></textarea>
+          <button id="sendBtn" class="btn primary" disabled>发送</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 右侧 docking 边栏（按会话分 tab） -->
+  <aside id="rightbar">
+    <div class="tabs">
+      <button data-tab="files" class="tab active">文件</button>
+      <button data-tab="preview" class="tab">预览</button>
+      <button data-tab="schedule" class="tab">Schedule</button>
+    </div>
+    <div id="tabFiles" class="tabpane active">
+      <div class="crumbs2" id="fileCrumbs"></div>
+      <div id="fileList"></div>
+    </div>
+    <div id="tabPreview" class="tabpane"><pre id="previewBox">选择左侧文件树中的文件…</pre></div>
+    <div id="tabSchedule" class="tabpane">
+      <div class="hint">只读目录（随 Web 包以 disabled 挂载）</div>
+      <ul id="schedList"></ul>
+    </div>
+  </aside>
+</div>
+
+<!-- Trajectory 浮层：append-only 事件日志 -->
+<section id="trajPanel" class="hidden">
+  <div class="traj-head">
+    <b>Trajectory</b>
+    <select id="trajSrc">
+      <option value="">全部来源</option>
+      <option value="system">system</option>
+      <option value="model">model</option>
+      <option value="tool">tool</option>
+      <option value="subagent">subagent</option>
+      <option value="context">context</option>
+    </select>
+    <input id="trajSearch" placeholder="搜索事件…">
+    <button id="resumeBtn" class="btn ghost">Resume</button>
+    <button id="forkBtn" class="btn ghost">Fork 会话</button>
+    <button class="btn ghost" data-close="trajPanel">✕</button>
+  </div>
+  <div id="trajBody"></div>
+</section>
+
+<!-- 审批模态框（Standard 预设下工具调用） -->
+<div id="approvalModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>需要审批</h3>
+    <p class="hint">Standard 权限预设：工具调用需人工确认</p>
+    <div id="approvalText" class="code"></div>
+    <div class="modal-actions">
+      <button id="approveNo" class="btn">Deny</button>
+      <button id="approveYes" class="btn primary">Approve</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置面板 -->
+<div id="settingsPanel" class="modal hidden">
+  <div class="modal-card wide">
+    <div class="modal-actions" style="justify-content:space-between">
+      <h3>Settings</h3>
+      <button class="btn ghost" data-close="settingsPanel">✕</button>
+    </div>
+    <div class="settings-sec">
+      <h4>Models</h4>
+      <label>默认模型 <input id="defModel" placeholder="deepseek-v3.2"></label>
+      <div id="provList"></div>
+      <div class="prov-form">
+        <input id="pName" placeholder="provider 名称">
+        <input id="pUrl" placeholder="base_url (OpenAI 兼容)">
+        <input id="pKey" placeholder="api key">
+        <input id="pModels" placeholder="模型名，逗号分隔">
+        <button id="addProv" class="btn">Add a custom provider</button>
+      </div>
+      <button id="saveSettings" class="btn primary">保存（即时生效）</button>
+    </div>
+    <div class="settings-sec">
+      <h4>外观</h4>
+      <label><input type="checkbox" id="darkCheck" checked> 暗色主题</label>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
