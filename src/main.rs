@@ -137,6 +137,16 @@ fn handle(mut request: Request, state: &Arc<Mutex<AppState>>, root: &Arc<PathBuf
     };
 
     let response = route(&method, path, query, &body, state, root, request.headers());
+    if method == Method::Get && path == "api/stream" {
+        // long-lived SSE: wait_completion would block the accept loop forever —
+        // hand the connection to a dedicated thread instead
+        std::thread::spawn(move || {
+            if let Ok(mut w) = request.write(response) {
+                let _ = w.wait_completion();
+            }
+        });
+        return;
+    }
     let _ = request.respond(response);
 }
 
