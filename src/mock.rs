@@ -108,7 +108,7 @@ fn script_repo() -> Vec<Step> {
               loop), `events` (SSE stream).\n- **Notable**: token-gated launch URL, \
               per-session append-only trajectory, approval-gated tool calls under the \
               Standard permission preset.",
-            700,
+            delay_ms: 700,
             needs_approval: false,
             call_id: "",
             result: "",
@@ -170,7 +170,7 @@ fn script_bug() -> Vec<Step> {
               close token, which miscounted nested brackets by one. Reordered the two \
               statements in `src/parser.rs`; the suite is green (3/3).\n\nFiles changed: \
               `src/parser.rs` (+2 −1).",
-            600,
+            delay_ms: 600,
             needs_approval: false,
             call_id: "",
             result: "",
@@ -224,7 +224,7 @@ fn script_doc() -> Vec<Step> {
             source: "model",
             text: "Report saved to `docs/OPS-REPORT.md` and rendered below — iterate on it \
               by telling me what to change.",
-            600,
+              delay_ms: 600,
             needs_approval: false,
             call_id: "",
             result: "",
@@ -282,7 +282,7 @@ fn script_generic() -> Vec<Step> {
             text: "Done with the first pass. Summary: workspace scanned (8 entries), \
               sub-agent review found no blockers. Next steps are listed in the \
               trajectory log. Tell me which one to execute.",
-            500,
+            delay_ms: 500,
             needs_approval: false,
             call_id: "",
             result: "",
