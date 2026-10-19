@@ -373,6 +373,10 @@ pub fn spawn_engine(
                         }
                         thread::sleep(Duration::from_millis(120));
                     }
+                    eprintln!(
+                        "engine[{}] gate[{}] passed: decided={} ok={}",
+                        sid, s.call_id, decided, ok
+                    );
                     // clear the flag for the next gated call
                     let mut st = state.lock().unwrap();
                     if let Some(sess) = st.session(sid) {

@@ -101,8 +101,13 @@ fn main() {
         println!("remote access refused (loopback only). Re-run with --bind 0.0.0.0 --insecure to expose.");
     }
 
+    let loop_state = Arc::clone(&state);
+    let loop_root = Arc::clone(&root);
     for request in server.incoming_requests() {
-        handle(request, &state, &root);
+        // one thread per connection: a slow/SSE client can never starve the accept loop
+        let state = Arc::clone(&loop_state);
+        let root = Arc::clone(&loop_root);
+        std::thread::spawn(move || handle(request, &state, &root));
     }
 }
 
@@ -137,14 +142,6 @@ fn handle(mut request: Request, state: &Arc<Mutex<AppState>>, root: &Arc<PathBuf
     };
 
     let response = route(&method, path, query, &body, state, root, request.headers());
-    if method == Method::Get && path == "api/stream" {
-        // long-lived SSE: wait_completion would block the accept loop forever —
-        // hand the connection to a dedicated thread instead
-        std::thread::spawn(move || {
-            let _ = request.respond(response);
-        });
-        return;
-    }
     let _ = request.respond(response);
 }
 
@@ -465,6 +462,7 @@ fn route(
                     None => 0,
                 }
             };
+            eprintln!("sse[{}] stream opened (offset {})", sid, offset);
             let stream = SseStream {
                 sid,
                 start_offset: offset,
@@ -597,6 +595,15 @@ impl IoRead for SseStream {
                     serde_json::to_string(e).unwrap_or_default()
                 ));
             }
+            if !evts.is_empty() {
+                eprintln!(
+                    "sse[{}] drained {} events (offset {}, running={})",
+                    self.sid,
+                    evts.len(),
+                    self.start_offset,
+                    running
+                );
+            }
             if !running && evts.is_empty() && !self.sent_end {
                 chunk.push_str("event: end\ndata: {}\n\n");
                 self.sent_end = true;
@@ -606,6 +613,7 @@ impl IoRead for SseStream {
                 continue;
             }
             if self.sent_end && !running {
+                eprintln!("sse[{}] stream EOF", self.sid);
                 return Ok(0); // EOF
             }
             std::thread::sleep(Duration::from_millis(150));
