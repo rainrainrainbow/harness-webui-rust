@@ -429,15 +429,21 @@ pub fn spawn_engine(
                 }
             } else if s.t == "usage" {
                 // emit all remaining steps as-is (text/subagent/injection/etc.)
-                let mut st = state.lock().unwrap();
-                if let Some(sess) = st.session(sid) {
-                    sess.push(s.t, s.source, s.text.to_string(), s.extra.clone());
+                {
+                    let mut st = state.lock().unwrap();
+                    if let Some(sess) = st.session(sid) {
+                        sess.push(s.t, s.source, s.text.to_string(), s.extra.clone());
+                    }
                 }
+                // never hold the global lock across a sleep: it would stall
+                // every API handler (sessions list, approve, SSE drain)
                 thread::sleep(Duration::from_millis(150));
             } else {
-                let mut st = state.lock().unwrap();
-                if let Some(sess) = st.session(sid) {
-                    sess.push(s.t, s.source, s.text.to_string(), s.extra.clone());
+                {
+                    let mut st = state.lock().unwrap();
+                    if let Some(sess) = st.session(sid) {
+                        sess.push(s.t, s.source, s.text.to_string(), s.extra.clone());
+                    }
                 }
                 thread::sleep(Duration::from_millis(s.delay_ms));
             }

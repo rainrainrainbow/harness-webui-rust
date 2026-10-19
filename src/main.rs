@@ -1,14 +1,14 @@
 mod mock;
 mod state;
 
-use std::io::Read as IoRead;
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tiny_http::{Header, Method, Request, Response, ResponseBox, Server, StatusCode};
+use tiny_http::{Header, Method, Request, Response, ResponseBox, Server};
 
 use state::{AppState, Provider};
 
@@ -107,7 +107,15 @@ fn main() {
         // one thread per connection: a slow/SSE client can never starve the accept loop
         let state = Arc::clone(&loop_state);
         let root = Arc::clone(&loop_root);
-        std::thread::spawn(move || handle(request, &state, &root));
+        match std::thread::Builder::new().spawn(move || handle(request, &state, &root)) {
+            Ok(_) => {}
+            Err(e) => {
+                // spawn failed (resource exhaustion): the failed closure dropped
+                // the request, and Request::Drop sends a 500 for it, so the
+                // client gets an error instead of hanging; the accept loop lives on
+                eprintln!("failed to spawn handler thread ({e}); request dropped (500 sent)");
+            }
+        }
     }
 }
 
@@ -133,6 +141,16 @@ fn handle(mut request: Request, state: &Arc<Mutex<AppState>>, root: &Arc<PathBuf
     };
     let path = path.trim_start_matches('/');
 
+    // SSE: dedicated streaming path. tiny_http's respond() funnels the body
+    // through a 1024-byte BufWriter that is only flushed at end-of-stream,
+    // so a long-lived stream would deliver 0 bytes to the client until it
+    // finishes. Instead we take the raw socket writer and push + flush after
+    // every event batch, so events reach the client in real time.
+    if method == Method::Get && path == "api/stream" {
+        handle_sse(request, state, query);
+        return;
+    }
+
     let mut body = String::new();
     request.as_reader().read_to_string(&mut body).ok();
     let body: Value = if body.is_empty() {
@@ -143,6 +161,106 @@ fn handle(mut request: Request, state: &Arc<Mutex<AppState>>, root: &Arc<PathBuf
 
     let response = route(&method, path, query, &body, state, root, request.headers());
     let _ = request.respond(response);
+}
+
+/// SSE streaming: write the HTTP response header to the raw socket writer,
+/// then push each drained event batch and flush immediately, so events reach
+/// the client in real time (tiny_http's respond()/BufWriter only flushes at
+/// end-of-stream, which would deliver 0 bytes during the stream).
+fn handle_sse(request: Request, state: &Arc<Mutex<AppState>>, query: &str) {
+    if !authed(request.headers(), query, state) {
+        let _ = request.respond(json_error(401, "unauthenticated"));
+        return;
+    }
+
+    let sid: u64 = q_param(query, "s").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let start_offset = {
+        let st = state.lock().unwrap();
+        st.sessions
+            .iter()
+            .find(|s| s.id == sid)
+            .map(|s| s.events.len())
+            .unwrap_or(0)
+    };
+    eprintln!("sse[{}] stream opened (offset {})", sid, start_offset);
+
+    let http_version = request.http_version().clone();
+    let mut writer = request.into_writer();
+
+    // No Content-Length is possible for a live stream; tell clients to read
+    // until the connection closes.
+    let header = format!(
+        "HTTP/{}.{} 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Cache-Control: no-cache\r\n\
+         X-Accel-Buffering: no\r\n\
+         Connection: close\r\n\
+         \r\n",
+        http_version.0, http_version.1
+    );
+    if !write_and_flush(&mut writer, header.as_bytes()) {
+        eprintln!("sse[{}] client gone before header", sid);
+        return;
+    }
+
+    let mut offset = start_offset;
+    let mut sent_end = false;
+    loop {
+        // drain new events; keep the lock held only for the drain itself
+        let (evts, running) = {
+            let st = state.lock().unwrap();
+            match st.sessions.iter().find(|s| s.id == sid) {
+                Some(s) => {
+                    let new = s
+                        .events
+                        .get(offset..)
+                        .map(|v| v.to_vec())
+                        .unwrap_or_default();
+                    offset += new.len();
+                    (new, s.running)
+                }
+                None => (Vec::new(), false),
+            }
+        };
+
+        let mut payload = String::new();
+        for e in &evts {
+            payload.push_str(&format!(
+                "data: {}\n\n",
+                serde_json::to_string(e).unwrap_or_default()
+            ));
+        }
+        if !evts.is_empty() {
+            eprintln!(
+                "sse[{}] drained {} events (offset {}, running={})",
+                sid,
+                evts.len(),
+                offset,
+                running
+            );
+        }
+        if !running && evts.is_empty() && !sent_end {
+            payload.push_str("event: end\ndata: {}\n\n");
+            sent_end = true;
+        }
+        if !payload.is_empty() {
+            // flush after every batch: this is what makes the stream real-time
+            if !write_and_flush(&mut writer, payload.as_bytes()) {
+                eprintln!("sse[{}] client gone, stopping stream", sid);
+                return;
+            }
+        }
+        if sent_end && !running {
+            eprintln!("sse[{}] stream EOF", sid);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    // dropping the writer flushes any remainder and closes the write side
+}
+
+fn write_and_flush(w: &mut Box<dyn IoWrite + Send>, bytes: &[u8]) -> bool {
+    w.write_all(bytes).is_ok() && w.flush().is_ok()
 }
 
 fn q_param(query: &str, key: &str) -> Option<String> {
@@ -453,30 +571,6 @@ fn route(
             mock::spawn_engine(Arc::clone(state), sid, prompt, model, mode, permission);
             json_response(json!({ "ok": true, "stream": format!("/api/stream?s={sid}") }))
         }
-        (Method::Get, "api/stream") => {
-            let sid: u64 = q_param(query, "s").and_then(|v| v.parse().ok()).unwrap_or(0);
-            let offset = {
-                let st = state.lock().unwrap();
-                match st.sessions.iter().find(|s| s.id == sid) {
-                    Some(s) => s.events.len(),
-                    None => 0,
-                }
-            };
-            eprintln!("sse[{}] stream opened (offset {})", sid, offset);
-            let stream = SseStream {
-                sid,
-                start_offset: offset,
-                state: Arc::clone(state),
-                buf: Vec::new(),
-                buf_pos: 0,
-                sent_end: false,
-            };
-            Response::new(StatusCode(200), Vec::new(), stream, None, None)
-                .with_header(h("Content-Type", "text/event-stream"))
-                .with_header(h("Cache-Control", "no-cache"))
-                .with_header(h("X-Accel-Buffering", "no"))
-                .boxed()
-        }
         (Method::Post, "api/approve") => {
             let sid: u64 = body.get("s").and_then(|v| v.as_u64()).unwrap_or(0);
             let ok = body.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -546,77 +640,3 @@ impl Provider {
     }
 }
 
-/// SSE stream: re-emit events appended after `start_offset`; close when the session
-/// stops running and we have caught up. Implements `std::io::Read` so tiny_http can
-/// stream it in chunks.
-struct SseStream {
-    sid: u64,
-    start_offset: usize,
-    state: Arc<Mutex<AppState>>,
-    buf: Vec<u8>,
-    buf_pos: usize,
-    sent_end: bool,
-}
-
-impl IoRead for SseStream {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            // serve buffered bytes first
-            if self.buf_pos < self.buf.len() {
-                let n = out.len().min(self.buf.len() - self.buf_pos);
-                out[..n].copy_from_slice(&self.buf[self.buf_pos..self.buf_pos + n]);
-                self.buf_pos += n;
-                if self.buf_pos == self.buf.len() {
-                    self.buf.clear();
-                    self.buf_pos = 0;
-                }
-                return Ok(n);
-            }
-            // drain new events from the session
-            let (evts, running) = {
-                let st = self.state.lock().unwrap();
-                match st.sessions.iter().find(|s| s.id == self.sid) {
-                    Some(s) => {
-                        let new = s
-                            .events
-                            .get(self.start_offset..)
-                            .map(|v| v.to_vec())
-                            .unwrap_or_default();
-                        self.start_offset += new.len();
-                        (new, s.running)
-                    }
-                    None => (Vec::new(), false),
-                }
-            };
-            let mut chunk = String::new();
-            for e in &evts {
-                chunk.push_str(&format!(
-                    "data: {}\n\n",
-                    serde_json::to_string(e).unwrap_or_default()
-                ));
-            }
-            if !evts.is_empty() {
-                eprintln!(
-                    "sse[{}] drained {} events (offset {}, running={})",
-                    self.sid,
-                    evts.len(),
-                    self.start_offset,
-                    running
-                );
-            }
-            if !running && evts.is_empty() && !self.sent_end {
-                chunk.push_str("event: end\ndata: {}\n\n");
-                self.sent_end = true;
-            }
-            if !chunk.is_empty() {
-                self.buf.extend_from_slice(chunk.as_bytes());
-                continue;
-            }
-            if self.sent_end && !running {
-                eprintln!("sse[{}] stream EOF", self.sid);
-                return Ok(0); // EOF
-            }
-            std::thread::sleep(Duration::from_millis(150));
-        }
-    }
-}
