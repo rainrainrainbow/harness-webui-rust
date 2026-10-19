@@ -20,11 +20,12 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install cross-linker & zigbuild
+      - name: Install zig & cargo-zigbuild
         run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          pipx install cargo-zigbuild
+          curl -L --fail --retry 3 -o /tmp/zig.tar.xz https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz
+          tar xf /tmp/zig.tar.xz -C /tmp
+          echo "/tmp/zig-linux-x86_64-0.11.0" >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild --locked
 
       - name: Build release (aarch64 musl)
         run: |
