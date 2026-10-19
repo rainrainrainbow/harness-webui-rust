@@ -355,7 +355,7 @@ pub fn spawn_engine(
                     loop {
                         let (appr, await_flag) = {
                             let st = state.lock().unwrap();
-                            match st.session(sid) {
+                            match st.sessions.iter().find(|x| x.id == sid) {
                                 Some(sess) => (
                                     sess.approved.load(Ordering::SeqCst),
                                     sess.awaiting.as_deref() == Some(s.call_id),

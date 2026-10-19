@@ -119,7 +119,7 @@ fn rand_token() -> String {
     format!("{:016x}{:016x}", nanos, hasher.finish())
 }
 
-fn handle(request: Request, state: &Arc<Mutex<AppState>>, root: &Arc<PathBuf>) {
+fn handle(mut request: Request, state: &Arc<Mutex<AppState>>, root: &Arc<PathBuf>) {
     let method = request.method().clone();
     let url = request.url().to_string();
     let (path, query) = match url.find('?') {
@@ -194,7 +194,8 @@ fn authed(request_headers: &[Header], query: &str, state: &Arc<Mutex<AppState>>)
         st.token.clone()
     };
     let cookie_ok = request_headers.iter().any(|hd| {
-        hd.field() == "cookie" && hd.value.contains(&format!("dsh={token}"))
+        hd.field.equiv("cookie")
+            && hd.value.to_string().contains(&format!("dsh={token}"))
     });
     if cookie_ok {
         return true;
@@ -218,7 +219,7 @@ fn safe_join(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
             s => stack.push(s),
         }
     }
-    Some(root.join(stack.iter().collect::<Vec<_>>().join("/")))
+    Some(root.join(stack.join("/")))
 }
 
 fn route(
@@ -275,7 +276,11 @@ fn route(
         // sessions
         (Method::Get, "api/sessions") => {
             let st = state.lock().unwrap();
-            let list: Vec<Value> = st.sessions.iter().map(|s| Value::from(s.view())).collect();
+            let list: Vec<Value> = st
+                .sessions
+                .iter()
+                .map(|s| serde_json::to_value(s.view()).unwrap_or_default())
+                .collect();
             json_response(Value::Array(list))
         }
         (Method::Post, "api/sessions") => {
@@ -296,7 +301,11 @@ fn route(
             let st = state.lock().unwrap();
             match st.sessions.iter().find(|s| s.id == sid) {
                 Some(s) => {
-                    let events: Vec<Value> = s.events.iter().map(Value::from).collect();
+                    let events: Vec<Value> = s
+                        .events
+                        .iter()
+                        .map(|e| serde_json::to_value(e).unwrap_or_default())
+                        .collect();
                     json_response(json!({
                         "id": s.id, "title": s.title, "running": s.running,
                         "finished": s.finished, "workspace": s.workspace, "events": events,
@@ -382,7 +391,7 @@ fn route(
             let rel = q_param(query, "path").unwrap_or_default();
             let target = safe_join(root, &rel);
             let target = match target {
-                Some(t) if t.starts_with(root.as_path()) && t != *root => t,
+                Some(t) if t.starts_with(root.as_path()) && t.as_path() != root.as_path() => t,
                 _ => return json_error(403, "path escapes workspace root"),
             };
             match std::fs::read(&target) {
@@ -585,7 +594,7 @@ impl IoRead for SseStream {
                 self.sent_end = true;
             }
             if !chunk.is_empty() {
-                self.buf.extend_from_utf8(chunk);
+                self.buf.extend_from_slice(chunk.as_bytes());
                 continue;
             }
             if self.sent_end && !running {

@@ -168,9 +168,10 @@ impl AppState {
             .iter()
             .find(|s| s.id == id)
             .and_then(|s| s.workspace.clone());
+        let seq = src.len() as u64;
         let mut s = Session::new(self.next_id, title);
         s.events = src;
-        s.event_seq = src.len() as u64;
+        s.event_seq = seq;
         s.workspace = ws;
         s.finished = true;
         let fid = s.id;
