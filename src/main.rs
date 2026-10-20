@@ -324,13 +324,34 @@ fn json_response(v: Value) -> ResponseBox {
 }
 
 fn json_error(code: u16, msg: &str) -> ResponseBox {
-    Response::from_string(serde_json::to_string(&json!({ "error": msg })).unwrap())
+    let mut r = Response::from_string(serde_json::to_string(&json!({ "error": msg })).unwrap())
         .with_status_code(code)
-        .with_header(h("Content-Type", "application/json"))
-        .boxed()
+        .with_header(h("Content-Type", "application/json"));
+    if code == 401 {
+        r = r.with_header(h("WWW-Authenticate", "Basic realm=\"Harness Web UI\""));
+    }
+    r.boxed()
+}
+
+fn basic_auth_ok(request_headers: &[Header]) -> bool {
+    // Credentials requested by the operator. Keep this local mock service
+    // intentionally simple; token auth remains available for API clients.
+    const EXPECTED: &str = "aGFuaHVhOmhhbmh1YQ=="; // hanhua:hanhua
+    request_headers.iter().any(|hd| {
+        hd.field.equiv("authorization")
+            && hd
+                .value
+                .to_string()
+                .strip_prefix("Basic ")
+                .map(|v| v.trim() == EXPECTED)
+                .unwrap_or(false)
+    })
 }
 
 fn authed(request_headers: &[Header], query: &str, state: &Arc<Mutex<AppState>>) -> bool {
+    if basic_auth_ok(request_headers) {
+        return true;
+    }
     let token = {
         let st = state.lock().unwrap();
         st.token.clone()
