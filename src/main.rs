@@ -205,9 +205,11 @@ fn handle_sse(request: Request, state: &Arc<Mutex<AppState>>, query: &str) {
 
     let mut offset = start_offset;
     let mut sent_end = false;
+    let mut idle_since = std::time::Instant::now();
+    let idle_timeout = Duration::from_secs(60); // 60s 无活动且未结束则收尾，防线程泄漏
     loop {
         // drain new events; keep the lock held only for the drain itself
-        let (evts, running) = {
+        let (evts, running, finished, exists) = {
             let st = state.lock().unwrap();
             match st.sessions.iter().find(|s| s.id == sid) {
                 Some(s) => {
@@ -216,12 +218,21 @@ fn handle_sse(request: Request, state: &Arc<Mutex<AppState>>, query: &str) {
                         .get(offset..)
                         .map(|v| v.to_vec())
                         .unwrap_or_default();
-                    offset += new.len();
-                    (new, s.running)
+                    let running = s.running;
+                    let finished = s.finished;
+                    if !new.is_empty() {
+                        offset += new.len();
+                    }
+                    (new, running, finished, true)
                 }
-                None => (Vec::new(), false),
+                None => (Vec::new(), false, false, false),
             }
         };
+
+        if !exists {
+            eprintln!("sse[{}] session gone, EOF", sid);
+            break;
+        }
 
         let mut payload = String::new();
         for e in &evts {
@@ -232,17 +243,19 @@ fn handle_sse(request: Request, state: &Arc<Mutex<AppState>>, query: &str) {
         }
         if !evts.is_empty() {
             eprintln!(
-                "sse[{}] drained {} events (offset {}, running={})",
-                sid,
-                evts.len(),
-                offset,
-                running
+                "sse[{}] drained {} events (offset {}, running={}, finished={})",
+                sid, evts.len(), offset, running, finished
             );
+            idle_since = std::time::Instant::now();
         }
-        if !running && evts.is_empty() && !sent_end {
+
+        // 只有在会话真正结束时才发 end 并关闭；会话尚未结束（含还没开始、
+        // 正在运行）时保持流打开等待后续事件。
+        if finished && !sent_end {
             payload.push_str("event: end\ndata: {}\n\n");
             sent_end = true;
         }
+
         if !payload.is_empty() {
             // flush after every batch: this is what makes the stream real-time
             if !write_and_flush(&mut writer, payload.as_bytes()) {
@@ -250,8 +263,14 @@ fn handle_sse(request: Request, state: &Arc<Mutex<AppState>>, query: &str) {
                 return;
             }
         }
-        if sent_end && !running {
+
+        if sent_end {
             eprintln!("sse[{}] stream EOF", sid);
+            break;
+        }
+        // 空闲超时：一直没开始、也没结束，超过时限就关掉，避免线程滞留
+        if idle_since.elapsed() > idle_timeout {
+            eprintln!("sse[{}] idle {idle_timeout:?} (finished={finished}) timeout, EOF", sid);
             break;
         }
         std::thread::sleep(Duration::from_millis(150));
